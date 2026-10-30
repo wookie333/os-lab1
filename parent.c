@@ -90,7 +90,7 @@ int main(void) {
             size_t n = strcspn(line, "\n");
             line[n] = '\n';
 
-            // длиннее 10 символов - во второй канал, иначе в первый
+            
             int fd = (n > 10) ? pipe2[1] : pipe1[1];
             if (write(fd, line, n + 1) == -1) {
                 perror("write");
