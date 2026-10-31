@@ -1,13 +1,14 @@
+
 #define _POSIX_C_SOURCE 200809L
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "io_utils.h"
 
 int main(void) {
     char *line = NULL;
     size_t cap = 0;
 
-    while (getline(&line, &cap, stdin) != -1) {
+    while (read_line(STDIN_FILENO, &line, &cap) != -1) {
         size_t n = strcspn(line, "\n");
         line[n] = '\0';
 
@@ -17,8 +18,9 @@ int main(void) {
             line[n - 1 - i] = t;
         }
 
-        if (printf("%s\n", line) < 0 || fflush(stdout) == EOF) {
-            perror("write");
+        if (write_all(STDOUT_FILENO, line, n) == -1 ||
+            write_all(STDOUT_FILENO, "\n", 1) == -1) {
+            print_error("write");
             free(line);
             return 1;
         }
