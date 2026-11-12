@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.o
+*.dSYM/
+~$*
+.idea/
+.vscode/
+
+/tmp/
+/lab1/parent
+/lab1/child
+/lab1/out1.txt
+/lab1/out2.txt
+/lab2/lab2
+/lab2/previous/
+/lab2/points.txt
