@@ -8,81 +8,71 @@ typedef struct {
     Message *m;
     sem_t *ready;
     pid_t pid;
-    int owns_memory;
 } Channel;
 
 static Channel ch[2];
 static sem_t *ack;
 static char ack_name[32];
-static volatile sig_atomic_t child_failed;
+static const char *sem_names[3];
+static int sem_count, memory_count;
+static volatile sig_atomic_t child_exited;
 
-static void on_exit_child(int sig, siginfo_t *info, void *context)
+static sem_t *create_sem(const char *name)
 {
+    sem_t *sem = sem_open(name, O_CREAT | O_EXCL, 0600, 0);
+    if (sem == SEM_FAILED) fail("sem_open");
+    sem_names[sem_count++] = name;
+    return sem;
+}
+
+static void on_exit_child(int sig)
+{
+    int saved = errno;
     (void)sig;
-    (void)context;
-    if (info->si_code != CLD_EXITED || info->si_status != 0) {
-        int saved = errno;
-        child_failed = 1;
-        sem_post(ack);
-        errno = saved;
-    }
+    child_exited = 1;
+    sem_post(ack);
+    errno = saved;
 }
 
 static void wait_reply(void)
 {
     wait_sem(ack);
-    if (child_failed) {
-        fprintf(stderr, "Дочерний процесс завершился с ошибкой\n");
+    if (child_exited) {
+        fprintf(stderr, "Дочерний процесс завершился до конца обмена\n");
         exit(1);
     }
 }
 
 static void remove_names(void)
 {
-    for (int i = 0; i < 2; i++) {
-        Channel *c = &ch[i];
-        if (c->owns_memory) {
-            if (shm_unlink(c->memory) == -1) perror("shm_unlink");
-            else c->owns_memory = 0;
-        }
-        if (c->ready && c->ready != SEM_FAILED && c->ready_name[0]) {
-            if (sem_unlink(c->ready_name) == -1) perror("sem_unlink");
-            else c->ready_name[0] = 0;
-        }
-    }
-    if (ack_name[0]) {
-        if (sem_unlink(ack_name) == -1) perror("sem_unlink");
-        else ack_name[0] = 0;
-    }
+    for (int i = 0; i < memory_count; i++)
+        if (shm_unlink(ch[i].memory) == -1) perror("shm_unlink");
+    for (int i = 0; i < sem_count; i++)
+        if (sem_unlink(sem_names[i]) == -1) perror("sem_unlink");
+    memory_count = sem_count = 0;
 }
 
 static void cleanup(void)
 {
-    signal(SIGCHLD, SIG_DFL);
     remove_names();
     for (int i = 0; i < 2; i++) {
-        Channel *c = &ch[i];
-        if (c->pid > 0) {
-            kill(c->pid, SIGTERM);
-            while (waitpid(c->pid, NULL, 0) == -1 && errno == EINTR) {}
-        }
-        if (c->m && munmap(c->m, sizeof(Message)) == -1) perror("munmap");
-        if (c->ready && c->ready != SEM_FAILED && sem_close(c->ready) == -1) perror("sem_close");
+        if (ch[i].pid <= 0) continue;
+        kill(ch[i].pid, SIGTERM);
+        while (waitpid(ch[i].pid, NULL, 0) == -1 && errno == EINTR) {}
     }
-    if (sem_close(ack) == -1) perror("sem_close");
 }
 
-static void start(Channel *c, int id, const char *file)
+static void start(int id, const char *file)
 {
+    Channel *c = &ch[id];
     snprintf(c->memory, sizeof(c->memory), "/l3m%ld_%d", (long)getpid(), id);
     snprintf(c->ready_name, sizeof(c->ready_name), "/l3r%ld_%d", (long)getpid(), id);
     int fd = shm_open(c->memory, O_CREAT | O_EXCL | O_RDWR, 0600);
     if (fd == -1) fail("shm_open");
-    c->owns_memory = 1;
+    memory_count++;
     if (ftruncate(fd, sizeof(Message)) == -1) fail("ftruncate");
     c->m = map_message(fd);
-    c->ready = sem_open(c->ready_name, O_CREAT | O_EXCL, 0600, 0);
-    if (c->ready == SEM_FAILED) fail("sem_open");
+    c->ready = create_sem(c->ready_name);
     c->pid = fork();
     if (c->pid == -1) fail("fork");
     if (c->pid == 0) {
@@ -122,18 +112,16 @@ int main(void)
         if (files[i][n - 1] == '\n') files[i][n - 1] = '\0';
     }
     snprintf(ack_name, sizeof(ack_name), "/l3a%ld", (long)getpid());
-    ack = sem_open(ack_name, O_CREAT | O_EXCL, 0600, 0);
-    if (ack == SEM_FAILED) fail("sem_open");
-    atexit(cleanup);
+    if (atexit(cleanup) != 0) return 1;
+    ack = create_sem(ack_name);
 
-    struct sigaction action = {0};
-    action.sa_sigaction = on_exit_child;
-    action.sa_flags = SA_SIGINFO | SA_NOCLDSTOP;
+    struct sigaction action = {.sa_handler = on_exit_child};
+    action.sa_flags = SA_NOCLDSTOP;
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGCHLD, &action, NULL) == -1) fail("sigaction");
 
     for (int i = 0; i < 2; i++) {
-        start(&ch[i], i, files[i]);
+        start(i, files[i]);
         free(files[i]);
     }
     remove_names();
@@ -150,8 +138,6 @@ int main(void)
     for (int i = 0; i < 2; i++) {
         ch[i].m->size = -1;
         post(ch[i].ready);
-    }
-    for (int i = 0; i < 2; i++) {
         int status;
         while (waitpid(ch[i].pid, &status, 0) == -1)
             if (errno != EINTR) fail("waitpid");
